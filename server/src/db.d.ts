@@ -234,6 +234,14 @@ export interface GeodataPlaces {
   name: string;
 }
 
+export interface Jobs {
+  id: Generated<string>;
+  queue: string;
+  name: string;
+  status: string;
+  data: any;
+}
+
 export interface Libraries {
   createdAt: Generated<Timestamp>;
   deletedAt: Timestamp | null;
@@ -459,6 +467,7 @@ export interface DB {
   exif: Exif;
   face_search: FaceSearch;
   geodata_places: GeodataPlaces;
+  jobs: Jobs;
   libraries: Libraries;
   memories: Memories;
   memories_assets_assets: MemoriesAssetsAssets;

@@ -541,8 +541,6 @@ export type FaceDto = {
 };
 export type JobCountsDto = {
     active: number;
-    completed: number;
-    delayed: number;
     failed: number;
     paused: number;
     waiting: number;

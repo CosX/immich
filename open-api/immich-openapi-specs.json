@@ -9629,12 +9629,6 @@
           "active": {
             "type": "integer"
           },
-          "completed": {
-            "type": "integer"
-          },
-          "delayed": {
-            "type": "integer"
-          },
           "failed": {
             "type": "integer"
           },
@@ -9647,8 +9641,6 @@
         },
         "required": [
           "active",
-          "completed",
-          "delayed",
           "failed",
           "paused",
           "waiting"

@@ -5,6 +5,7 @@ import { mapAsset } from 'src/dtos/asset-response.dto';
 import { AllJobStatusResponseDto, JobCommandDto, JobCreateDto, JobStatusDto } from 'src/dtos/job.dto';
 import {
   AssetType,
+  BootstrapEventPriority,
   ImmichWorker,
   JobCommand,
   JobName,
@@ -16,6 +17,7 @@ import {
 import { ArgOf, ArgsOf } from 'src/repositories/event.repository';
 import { BaseService } from 'src/services/base.service';
 import { ConcurrentQueueName, JobItem } from 'src/types';
+import { ClassConstructor } from 'class-transformer';
 
 const asJobItem = (dto: JobCreateDto): JobItem => {
   switch (dto.name) {
@@ -51,6 +53,8 @@ const asJobItem = (dto: JobCreateDto): JobItem => {
 
 @Injectable()
 export class JobService extends BaseService {
+  private services: ClassConstructor<unknown>[] = [];
+
   @OnEvent({ name: 'config.init', workers: [ImmichWorker.MICROSERVICES] })
   onConfigInit({ newConfig: config }: ArgOf<'config.init'>) {
     this.logger.debug(`Updating queue concurrency settings`);
@@ -67,6 +71,18 @@ export class JobService extends BaseService {
   @OnEvent({ name: 'config.update', server: true, workers: [ImmichWorker.MICROSERVICES] })
   onConfigUpdate({ newConfig: config }: ArgOf<'config.update'>) {
     this.onConfigInit({ newConfig: config });
+  }
+
+  @OnEvent({ name: 'app.bootstrap', priority: BootstrapEventPriority.DatabaseService })
+  async onBootstrap() {
+    this.jobRepository.setup(this.services);
+    if (this.worker === ImmichWorker.MICROSERVICES) {
+      this.jobRepository.startWorkers();
+    }
+  }
+
+  setServices(services: ClassConstructor<unknown>[]) {
+    this.services = services;
   }
 
   async create(dto: JobCreateDto): Promise<void> {

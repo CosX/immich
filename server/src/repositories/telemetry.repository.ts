@@ -4,7 +4,6 @@ import { MetricOptions } from '@opentelemetry/api';
 import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
 import { PrometheusExporter } from '@opentelemetry/exporter-prometheus';
 import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
-import { IORedisInstrumentation } from '@opentelemetry/instrumentation-ioredis';
 import { NestInstrumentation } from '@opentelemetry/instrumentation-nestjs-core';
 import { PgInstrumentation } from '@opentelemetry/instrumentation-pg';
 import { resourceFromAttributes } from '@opentelemetry/resources';
@@ -25,7 +24,7 @@ type MetricGroupOptions = { enabled: boolean };
 export class MetricGroupRepository {
   private enabled = false;
 
-  constructor(private metricService: MetricService) {}
+  constructor(private metricService: MetricService) { }
 
   addToCounter(name: string, value: number, options?: MetricOptions): void {
     if (this.enabled) {
@@ -70,7 +69,7 @@ export const bootstrapTelemetry = (port: number) => {
     contextManager: new AsyncLocalStorageContextManager(),
     instrumentations: [
       new HttpInstrumentation(),
-      new IORedisInstrumentation(),
+      // new IORedisInstrumentation(),
       new NestInstrumentation(),
       new PgInstrumentation(),
     ],

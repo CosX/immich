@@ -39,36 +39,37 @@ export type PostgresConnectionConfig = {
 export const isValidSsl = (ssl?: string | boolean | object): ssl is Ssl =>
   typeof ssl !== 'string' || ssl === 'require' || ssl === 'allow' || ssl === 'prefer' || ssl === 'verify-full';
 
+// TODO: Hack to access the driver. We should instead inject the driver here and elsewhere.
+export let driver: postgres.Sql | undefined;
 export const getKyselyConfig = (options: PostgresConnectionConfig): KyselyConfig => {
+  driver = postgres({
+    onnotice: (notice: Notice) => {
+      if (notice['severity'] !== 'NOTICE') {
+        console.warn('Postgres notice:', notice);
+      }
+    },
+    max: 10,
+    types: {
+      date: {
+        to: 1184,
+        from: [1082, 1114, 1184],
+        serialize: (x: Date | string) => (x instanceof Date ? x.toISOString() : x),
+        parse: (x: string) => new Date(x),
+      },
+      bigint: {
+        to: 20,
+        from: [20, 1700],
+        parse: (value: string) => Number.parseInt(value),
+        serialize: (value: number) => value.toString(),
+      },
+    },
+    connection: {
+      TimeZone: 'UTC',
+    },
+    ...options,
+  });
   return {
-    dialect: new PostgresJSDialect({
-      postgres: postgres({
-        onnotice: (notice: Notice) => {
-          if (notice['severity'] !== 'NOTICE') {
-            console.warn('Postgres notice:', notice);
-          }
-        },
-        max: 10,
-        types: {
-          date: {
-            to: 1184,
-            from: [1082, 1114, 1184],
-            serialize: (x: Date | string) => (x instanceof Date ? x.toISOString() : x),
-            parse: (x: string) => new Date(x),
-          },
-          bigint: {
-            to: 20,
-            from: [20, 1700],
-            parse: (value: string) => Number.parseInt(value),
-            serialize: (value: number) => value.toString(),
-          },
-        },
-        connection: {
-          TimeZone: 'UTC',
-        },
-        ...options,
-      }),
-    }),
+    dialect: new PostgresJSDialect({ postgres: driver }),
     log(event) {
       if (event.level === 'error') {
         console.error('Query failed :', {
@@ -110,14 +111,14 @@ export function toJson<DB, TB extends keyof DB & string, T extends TB | Expressi
     TB,
     Simplify<
       T extends TB
-        ? Selectable<DB[T]> extends Nullable<infer N>
-          ? N | null
-          : Selectable<DB[T]>
-        : T extends Expression<infer O>
-          ? O extends Nullable<infer N>
-            ? N | null
-            : O
-          : never
+      ? Selectable<DB[T]> extends Nullable<infer N>
+      ? N | null
+      : Selectable<DB[T]>
+      : T extends Expression<infer O>
+      ? O extends Nullable<infer N>
+      ? N | null
+      : O
+      : never
     >
   >;
 }

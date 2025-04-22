@@ -1,4 +1,3 @@
-import { BullModule } from '@nestjs/bullmq';
 import { Inject, Module, OnModuleDestroy, OnModuleInit, ValidationPipe } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR, APP_PIPE } from '@nestjs/core';
 import { ScheduleModule, SchedulerRegistry } from '@nestjs/schedule';
@@ -17,12 +16,12 @@ import { LoggingInterceptor } from 'src/middleware/logging.interceptor';
 import { repositories } from 'src/repositories';
 import { ConfigRepository } from 'src/repositories/config.repository';
 import { EventRepository } from 'src/repositories/event.repository';
-import { JobRepository } from 'src/repositories/job.repository';
 import { LoggingRepository } from 'src/repositories/logging.repository';
 import { teardownTelemetry, TelemetryRepository } from 'src/repositories/telemetry.repository';
 import { services } from 'src/services';
 import { AuthService } from 'src/services/auth.service';
 import { CliService } from 'src/services/cli.service';
+import { JobService } from 'src/services/job.service';
 import { getKyselyConfig } from 'src/utils/database';
 
 const common = [...repositories, ...services, GlobalExceptionFilter];
@@ -37,11 +36,9 @@ export const middleware = [
 ];
 
 const configRepository = new ConfigRepository();
-const { bull, cls, database, otel } = configRepository.getEnv();
+const { cls, database, otel } = configRepository.getEnv();
 
 const imports = [
-  BullModule.forRoot(bull.config),
-  BullModule.registerQueue(...bull.queues),
   ClsModule.forRoot(cls.config),
   OpenTelemetryModule.forRoot(otel),
   KyselyModule.forRoot(getKyselyConfig(database.config.kysely)),
@@ -52,7 +49,7 @@ class BaseModule implements OnModuleInit, OnModuleDestroy {
     @Inject(IWorker) private worker: ImmichWorker,
     logger: LoggingRepository,
     private eventRepository: EventRepository,
-    private jobRepository: JobRepository,
+    private jobService: JobService,
     private telemetryRepository: TelemetryRepository,
     private authService: AuthService,
   ) {
@@ -62,10 +59,7 @@ class BaseModule implements OnModuleInit, OnModuleDestroy {
   async onModuleInit() {
     this.telemetryRepository.setup({ repositories });
 
-    this.jobRepository.setup({ services });
-    if (this.worker === ImmichWorker.MICROSERVICES) {
-      this.jobRepository.startWorkers();
-    }
+    this.jobService.setServices(services)
 
     this.eventRepository.setAuthFn(async (client) =>
       this.authService.authenticate({
@@ -90,20 +84,20 @@ class BaseModule implements OnModuleInit, OnModuleDestroy {
   controllers: [...controllers],
   providers: [...common, ...middleware, { provide: IWorker, useValue: ImmichWorker.API }],
 })
-export class ApiModule extends BaseModule {}
+export class ApiModule extends BaseModule { }
 
 @Module({
   imports: [...imports],
   providers: [...common, { provide: IWorker, useValue: ImmichWorker.MICROSERVICES }, SchedulerRegistry],
 })
-export class MicroservicesModule extends BaseModule {}
+export class MicroservicesModule extends BaseModule { }
 
 @Module({
   imports: [...imports],
   providers: [...common, ...commands, SchedulerRegistry],
 })
 export class ImmichAdminModule implements OnModuleDestroy {
-  constructor(private service: CliService) {}
+  constructor(private service: CliService) { }
 
   async onModuleDestroy() {
     await this.service.cleanup();

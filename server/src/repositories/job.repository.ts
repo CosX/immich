@@ -11,6 +11,11 @@ import { EventRepository } from 'src/repositories/event.repository';
 import { LoggingRepository } from 'src/repositories/logging.repository';
 import { IEntityJob, JobCounts, JobItem, JobOf, QueueStatus } from 'src/types';
 import { getKeyByValue, getMethodNames, ImmichStartupError } from 'src/utils/misc';
+import { Kysely } from 'kysely';
+import { InjectKysely } from 'nestjs-kysely';
+import { DB } from 'src/db';
+import { GenerateSql } from 'src/decorators';
+import { driver } from "src/utils/database";
 
 type JobMapItem = {
   jobName: JobName;
@@ -21,6 +26,228 @@ type JobMapItem = {
 
 @Injectable()
 export class JobRepository {
+  private handlers: Partial<Record<JobName, JobMapItem>> = {};
+
+  constructor(
+    @InjectKysely() private db: Kysely<DB>,
+    private logger: LoggingRepository,
+    private moduleRef: ModuleRef,
+    private eventRepository: EventRepository,
+  ) {
+    this.logger.setContext(JobRepository.name);
+  }
+
+  setup(services: ClassConstructor<unknown>[]) {
+    const reflector = this.moduleRef.get(Reflector, { strict: false });
+
+    for (const service of services) {
+      const instance = this.moduleRef.get<any>(service);
+      for (const methodName of getMethodNames(instance)) {
+        const handler = instance[methodName];
+        const config = reflector.get<JobConfig>(MetadataKey.JOB_CONFIG, handler);
+        if (!config) {
+          continue;
+        }
+
+        const { name: jobName, queue: queueName } = config;
+        const label = `${service.name}.${handler.name}`;
+
+        // one handler per job
+        if (this.handlers[jobName]) {
+          const jobKey = getKeyByValue(JobName, jobName);
+          const errorMessage = `Failed to add job handler for ${label}`;
+          this.logger.error(
+            `${errorMessage}. JobName.${jobKey} is already handled by ${this.handlers[jobName].label}.`,
+          );
+          throw new ImmichStartupError(errorMessage);
+        }
+
+        this.handlers[jobName] = {
+          label,
+          jobName,
+          queueName,
+          handler: handler.bind(instance),
+        };
+
+        this.logger.verbose(`Added job handler: ${jobName} => ${label}`);
+      }
+    }
+  }
+
+  async startWorkers() {
+    for (const queueName of Object.values(QueueName)) {
+      this.logger.log(`Starting worker for queue: ${queueName}`);
+      // mostly not needed with triggers, only really used as a fallback
+      this.loop(queueName);
+    }
+
+    this.logger.log(`driver is ${driver}`);
+
+    if (driver) {
+      this.logger.log(`Starting listener`);
+      driver.listen('jobs', async (queueName: string) => {
+        this.logger.log(`Received notification for ${queueName}`);
+
+        // TODO: Might be better to wake workers up via Promise.all instead
+        await this.do(queueName as QueueName);
+      });
+    }
+  }
+
+  // use skip for locked
+  async loop(queue: QueueName): Promise<void> {
+    while (true) {
+      await this.do(queue);
+    }
+  }
+
+  async do(queue: QueueName): Promise<void> {
+    const result = await this.db.transaction().execute(async (db: Kysely<DB>) => {
+      const items: { id: string }[] = await db
+        .selectFrom('jobs')
+        .select(['id'])
+        .where('queue', '=', queue)
+        .forUpdate()
+        .skipLocked()
+        .limit(1)
+        .execute();
+
+      if (!items.length) {
+        // this.logger.log(`No jobs found in queue: ${queue}`);
+        return null;
+      }
+
+      return await db.
+        deleteFrom('jobs')
+        .where('id', '=', items[0].id)
+        .returningAll()
+        .executeTakeFirst();
+    });
+
+    if (!result) {
+      // this.logger.log(`No jobs found in queue (result): ${queue}`);
+      // TODO: should be configurable.
+      await setTimeout(5000);
+      return;
+    }
+
+    this.logger.log(`Processing job: ${result.name}, data: ${result.data}`);
+
+    result.data = JSON.parse(result.data);
+
+    await this.eventRepository.emit('job.start', queue, result as JobItem)
+  }
+
+  async run({ name, data }: { name: string, data?: any }): Promise<JobStatus> {
+    const item = this.handlers[name as JobName];
+    if (!item) {
+      this.logger.warn(`Skipping unknown job: "${name}"`);
+      return JobStatus.SKIPPED;
+    }
+
+    return item.handler(data);
+  }
+
+  @GenerateSql({ params: [] })
+  async queue(item: JobItem): Promise<void> {
+    this.logger.log(`Queueing job: ${item.name}, data: ${JSON.stringify(item.data)}`);
+    this.db.insertInto('jobs').values(this.itemValue(item)).execute();
+  }
+
+  @GenerateSql({ params: [] })
+  async queueAll(items: JobItem[]): Promise<void> {
+    if (items.length === 0) {
+      this.logger.log(`empty array? ${JSON.stringify(items)}`);
+      return;
+    }
+    this.logger.log(`Queueing jobs: ${items.map((item) => item.name).join(', ')}`);
+    this.db.insertInto('jobs').values(items.map(this.itemValue.bind(this))).execute();
+  }
+
+  private itemValue(item: JobItem): any {
+    return {
+      queue: this.queueName(item.name),
+      name: item.name,
+      status: JobStatus.PENDING,
+      data: JSON.stringify(item.data),
+    }
+  }
+
+  private queueName(name: JobName): string {
+    return (this.handlers[name] as JobMapItem).queueName;
+  }
+
+  async pause(name: QueueName): Promise<void> { }
+
+  async resume(name: QueueName): Promise<void> { }
+
+  async empty(name: QueueName): Promise<void> {
+    await this.db.deleteFrom('jobs')
+      .where('queue', '=', name)
+      .where('status', '=', JobStatus.ACTIVE)
+      .execute();
+  }
+
+  async clear(name: QueueName, type: QueueCleanType): Promise<void> {
+    await this.db.deleteFrom('jobs')
+      .where('queue', '=', name)
+      .where('status', '=', JobStatus.PENDING)
+      .execute();
+  }
+
+  async waitForQueueCompletion(...queues: QueueName[]): Promise<void> { }
+
+  async getJobCounts(name: QueueName): Promise<JobCounts> {
+    // count with sql
+    const result: {
+      status: string,
+      count: string | number | bigint,
+    }[] = await this.db
+      .selectFrom('jobs')
+      .select(['status', this.db.fn.count('id').as('count')])
+      .where('queue', '=', name)
+      .groupBy('status')
+      .execute();
+
+    const counts = result.reduce((acc: Record<JobStatus, Number>, row) => {
+      acc[row.status as JobStatus] = Number(row.count);
+      return acc;
+    }, {} as Record<JobStatus, number>);
+
+    return <JobCounts>{
+      active: counts[JobStatus.ACTIVE] || 0,
+      failed: 0,
+      waiting: counts[JobStatus.PENDING] || 0,
+      paused: 0,
+    }
+  }
+
+  async removeJob(jobId: string, name: JobName): Promise<IEntityJob | undefined> {
+    await this.db.deleteFrom('jobs')
+      .where('id', '=', jobId)
+      .execute();
+    return undefined;
+  }
+
+  async getQueueStatus(name: QueueName): Promise<QueueStatus> {
+    const result = await this.db
+      .selectFrom('jobs')
+      .select(['status'])
+      .where('queue', '=', name)
+      .where('status', '=', JobStatus.ACTIVE)
+      .limit(1)
+      .execute();
+    return {
+      isActive: result.length > 0,
+      isPaused: false,
+    }
+  }
+
+  async setConcurrency(queueName: QueueName, concurrency: number): Promise<void> { }
+}
+
+@Injectable()
+export class JobRepositoryOld {
   private workers: Partial<Record<QueueName, Worker>> = {};
   private handlers: Partial<Record<JobName, JobMapItem>> = {};
 
@@ -36,9 +263,8 @@ export class JobRepository {
   setup({ services }: { services: ClassConstructor<unknown>[] }) {
     const reflector = this.moduleRef.get(Reflector, { strict: false });
 
-    // discovery
-    for (const Service of services) {
-      const instance = this.moduleRef.get<any>(Service);
+    for (const service of services) {
+      const instance = this.moduleRef.get<any>(service);
       for (const methodName of getMethodNames(instance)) {
         const handler = instance[methodName];
         const config = reflector.get<JobConfig>(MetadataKey.JOB_CONFIG, handler);
@@ -47,7 +273,7 @@ export class JobRepository {
         }
 
         const { name: jobName, queue: queueName } = config;
-        const label = `${Service.name}.${handler.name}`;
+        const label = `${service.name}.${handler.name}`;
 
         // one handler per job
         if (this.handlers[jobName]) {
@@ -107,12 +333,6 @@ export class JobRepository {
 
   setConcurrency(queueName: QueueName, concurrency: number) {
     const worker = this.workers[queueName];
-    if (!worker) {
-      this.logger.warn(`Unable to set queue concurrency, worker not found: '${queueName}'`);
-      return;
-    }
-
-    worker.concurrency = concurrency;
   }
 
   async getQueueStatus(name: QueueName): Promise<QueueStatus> {
@@ -143,9 +363,7 @@ export class JobRepository {
   getJobCounts(name: QueueName): Promise<JobCounts> {
     return this.getQueue(name).getJobCounts(
       'active',
-      'completed',
       'failed',
-      'delayed',
       'waiting',
       'paused',
     ) as unknown as Promise<JobCounts>;

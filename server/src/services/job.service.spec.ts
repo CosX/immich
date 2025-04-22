@@ -55,9 +55,7 @@ describe(JobService.name, () => {
     it('should get all job statuses', async () => {
       mocks.job.getJobCounts.mockResolvedValue({
         active: 1,
-        completed: 1,
         failed: 1,
-        delayed: 1,
         waiting: 1,
         paused: 1,
       });
@@ -69,8 +67,6 @@ describe(JobService.name, () => {
       const expectedJobStatus = {
         jobCounts: {
           active: 1,
-          completed: 1,
-          delayed: 1,
           failed: 1,
           waiting: 1,
           paused: 1,
